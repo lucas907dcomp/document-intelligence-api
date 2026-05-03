@@ -1,0 +1,172 @@
+{
+  "storyId": "DIS-001",
+  "critiquedAt": "2026-05-02T00:00:00.000Z",
+  "critiquedBy": "@qa",
+  "specVersion": 1,
+
+  "verdict": "NEEDS_REVISION",
+  "verdictReason": "1 HIGH issue (CRIT-1): upload flow persists Document to DB before Kafka publish, contradicting EC-1 ('Do not persist Document record'). Results in unrecoverable orphaned DB records and volume files on Kafka failure. Fix is auto-fixable (step reordering). 3 MEDIUM gaps in testing coverage. Weighted average 3.95 — will reach APPROVED after revision.",
+
+  "scores": {
+    "accuracy": 4.0,
+    "completeness": 4.0,
+    "consistency": 3.0,
+    "feasibility": 4.0,
+    "alignment": 5.0,
+    "average": 3.95
+  },
+
+  "issues": [
+    {
+      "id": "CRIT-1",
+      "severity": "HIGH",
+      "category": "consistency",
+      "check": "con-4",
+      "description": "Upload flow in §3.3 orders operations as: (1) store to volume → (2) persist Document to DB → (3) publish to Kafka. EC-1 states 'Do not persist Document record' if Kafka is offline. Under the current order, a Kafka failure at step 3 leaves an orphaned Document record in PostgreSQL (status=PROCESSING, never advancing to READY or FAILED) and an orphaned PDF file on the shared volume. These records are invisible to the client (upload returned 503) but pollute the database permanently. The same incorrect order appears in the §9 implementation checklist: 'orchestrate validate → store → persist → publish'.",
+      "location": "spec.md#section-3.3-upload-flow, spec.md#section-9-service-layer",
+      "suggestion": "Reorder upload steps so the DB write only occurs after a successful Kafka publish: (1) validate → (2) store to volume → (3) publish to Kafka → (4) [on success] persist Document to DB → (5) return 202. On Kafka publish failure: delete file from volume, return 503 without any DB write. Update §9 checklist accordingly.",
+      "autoFixable": true
+    },
+    {
+      "id": "CRIT-2",
+      "severity": "MEDIUM",
+      "category": "completeness",
+      "check": "comp-2",
+      "description": "NFR-1 (p95 latency < 5000ms for Q&A endpoint) has no corresponding test scenario in §6. Performance requirements without test coverage are unverifiable at implementation time.",
+      "location": "spec.md#section-6-testing-strategy",
+      "suggestion": "Add a Gherkin scenario for NFR-1: 'Given a document with status READY / When I POST /documents/{id}/query / Then the response is received within 5000ms'. Also add a performance note to the integration test table (DocumentIntegrationTest).",
+      "autoFixable": true
+    },
+    {
+      "id": "CRIT-3",
+      "severity": "MEDIUM",
+      "category": "completeness",
+      "check": "comp-2",
+      "description": "EC-3 (OpenAI API unavailable → 502 Bad Gateway) has no dedicated Gherkin test scenario in §6.3. This is a HIGH severity edge case (per requirements.json) and the 502 response is a specific behavior contract that must be tested explicitly.",
+      "location": "spec.md#section-6.3-acceptance-tests",
+      "suggestion": "Add scenario: 'Given the OpenAI API is unavailable (mocked) / When I POST /documents/{id}/query / Then the response status is 502 Bad Gateway'.",
+      "autoFixable": true
+    },
+    {
+      "id": "CRIT-4",
+      "severity": "MEDIUM",
+      "category": "accuracy",
+      "check": "acc-4",
+      "description": "EC-2 (corrupted/image-only PDF → Document status FAILED) is partially covered in AC-9 (DLQ routing) but the Document status transition to FAILED is not verified as a separate explicit scenario. A developer implementing only DLQ routing without updating Document status would pass AC-9 but violate EC-2.",
+      "location": "spec.md#section-6.3-acceptance-tests",
+      "suggestion": "Add a separate Gherkin scenario for EC-2: 'Given a corrupted PDF is on the shared volume / When the consumer processes the DocumentUploadedEvent / Then the Document status is set to FAILED / And the error is logged'. This complements AC-9 which tests the DLQ side of the same failure.",
+      "autoFixable": true
+    },
+    {
+      "id": "CRIT-5",
+      "severity": "LOW",
+      "category": "consistency",
+      "check": "con-2",
+      "description": "Spring Retry is referenced in §7 Risks as the retry mechanism for OpenAI API rate limits ('configurable retry via Spring Retry') but is absent from §4.1 External Dependencies. A developer following the spec would not know to add it to pom.xml.",
+      "location": "spec.md#section-4.1-external-dependencies",
+      "suggestion": "Add 'Spring Retry | 2.x (via Spring Boot BOM) | Exponential backoff for OpenAI embedding API rate limits | FR-2, §7 Risk-1' to §4.1 dependency table.",
+      "autoFixable": true
+    },
+    {
+      "id": "CRIT-6",
+      "severity": "LOW",
+      "category": "consistency",
+      "check": "con-2",
+      "description": "Testcontainers is used in all 3 integration tests in §6.2 (DocumentIntegrationTest, KafkaConsumerIntegrationTest, PgVectorSearchTest) but is not listed in §4.1 External Dependencies. Missing from pom.xml scope=test.",
+      "location": "spec.md#section-4.1-external-dependencies",
+      "suggestion": "Add 'Testcontainers | 1.19.x | Containerized PostgreSQL + Kafka for integration tests | §6.2' to §4.1 dependency table with scope=test annotation.",
+      "autoFixable": true
+    }
+  ],
+
+  "summary": {
+    "highIssues": 1,
+    "mediumIssues": 3,
+    "lowIssues": 2,
+    "totalIssues": 6,
+    "autoFixable": 6,
+    "manualRequired": 0
+  },
+
+  "dimensionDetails": {
+    "accuracy": {
+      "score": 4.0,
+      "passing": ["acc-1: All FR-1 to FR-7 addressed", "acc-2: No phantom requirements", "acc-3: Priority mapping correct (P0 prominent, P1 in checklist)"],
+      "failing": ["acc-4: NFR-1 not covered by test scenario (CRIT-2)"]
+    },
+    "completeness": {
+      "score": 4.0,
+      "passing": ["comp-1: All 9 spec sections present", "comp-4: Full project structure documented", "comp-5: 6 risks documented with mitigations"],
+      "failing": ["comp-2: NFR-1, EC-2 status, EC-3 missing test scenarios (CRIT-2, CRIT-3, CRIT-4)", "comp-3: Testcontainers and Spring Retry absent from §4.1 (CRIT-5, CRIT-6)"]
+    },
+    "consistency": {
+      "score": 3.0,
+      "passing": ["con-1: All FR/NFR/CON IDs valid and correctly cross-referenced", "con-3: Spec depth appropriate for STANDARD complexity"],
+      "failing": ["con-4: Upload flow step order contradicts EC-1 transaction requirement (CRIT-1 — HIGH)", "con-2: Missing dependencies for Spring Retry and Testcontainers (CRIT-5, CRIT-6)"]
+    },
+    "feasibility": {
+      "score": 4.0,
+      "passing": ["feas-1: All 12 dependencies exist and are mutually compatible", "feas-2: Architecture sound — Claim Check + Strategy Pattern + EDA well-established", "feas-3: Scope appropriate for demo/portfolio project", "feas-4: No impossible requirements"],
+      "failing": []
+    },
+    "alignment": {
+      "score": 5.0,
+      "passing": ["align-1: Full stack matches CON-1 to CON-7 constraints", "align-2: Strategy Pattern, Repository, EDA patterns internally consistent", "align-3: Standard Java naming conventions throughout", "align-4: Greenfield project — self-consistent architecture"],
+      "failing": []
+    }
+  },
+
+  "nextAction": "Return spec.md to @pm for revision. Apply all 6 auto-fixes (all are additive or step-reordering — no architectural change required). Critical fix: CRIT-1 upload step reordering. After revision, re-run *critique-spec DIS-001.",
+
+  "autoFixes": [
+    {
+      "issueId": "CRIT-1",
+      "location": "spec.md#section-3.3-upload-flow",
+      "description": "Reorder upload flow: Kafka publish before DB persist",
+      "original": "  → StorageService.store(documentId, file)                  [CON-7, ADR-001]\n      writes to: {PDF_STORAGE_PATH}/{documentId}/{filename}\n  → Document{id, filename, storagePath, status=PROCESSING, uploadedAt, fileSizeBytes}\n      persisted to PostgreSQL\n  → DocumentEventProducer.publish(DocumentUploadedEvent{documentId, filePath})\n  → Return: 202 Accepted { documentId }",
+      "suggested": "  → StorageService.store(documentId, file)                  [CON-7, ADR-001]\n      writes to: {PDF_STORAGE_PATH}/{documentId}/{filename}\n  → DocumentEventProducer.publish(DocumentUploadedEvent{documentId, filePath})\n      [on KafkaException: StorageService.delete(filePath) → return 503, NO DB write]  [EC-1]\n  → Document{id, filename, storagePath, status=PROCESSING, uploadedAt, fileSizeBytes}\n      persisted to PostgreSQL (only after successful Kafka publish)\n  → Return: 202 Accepted { documentId }"
+    },
+    {
+      "issueId": "CRIT-1b",
+      "location": "spec.md#section-9-service-layer",
+      "description": "Fix checklist order to match corrected upload flow",
+      "original": "- [ ] Implement `DocumentService.upload()` — orchestrate validate → store → persist → publish — FR-1",
+      "suggested": "- [ ] Implement `DocumentService.upload()` — orchestrate validate → store → publish → [on success] persist → return 202; [on Kafka failure] delete file → return 503 — FR-1, EC-1"
+    },
+    {
+      "issueId": "CRIT-2",
+      "location": "spec.md#section-6.3 after EC-7 scenario",
+      "description": "Add NFR-1 performance test scenario",
+      "original": "(after EC-7 scenario block)",
+      "suggested": "  Scenario: NFR-1 Q&A endpoint responds within acceptable latency\n    Given a document with status READY\n    When I POST /documents/{id}/query with a valid question\n    Then the response is received within 5000ms\n    And the response status is 200 OK"
+    },
+    {
+      "issueId": "CRIT-3",
+      "location": "spec.md#section-6.3 Error Handling feature block",
+      "description": "Add EC-3 (502 on LLM unavailable) test scenario",
+      "original": "(after EC-5 scenario block)",
+      "suggested": "  Scenario: EC-3 LLM provider unavailable returns 502\n    Given the OpenAI API is unreachable (mocked to throw exception)\n    And a document with status READY exists\n    When I POST /documents/{id}/query\n    Then the response status is 502 Bad Gateway"
+    },
+    {
+      "issueId": "CRIT-4",
+      "location": "spec.md#section-6.3 Error Handling feature block",
+      "description": "Add EC-2 explicit Document FAILED status scenario",
+      "original": "(after EC-3 scenario block)",
+      "suggested": "  Scenario: EC-2 Corrupted PDF sets Document status to FAILED\n    Given a corrupted PDF file exists at the filePath in a DocumentUploadedEvent\n    When the Kafka consumer processes the event\n    Then the Document status is set to FAILED\n    And a structured error is logged containing the documentId and exception message"
+    },
+    {
+      "issueId": "CRIT-5",
+      "location": "spec.md#section-4.1 dependencies table",
+      "description": "Add Spring Retry to dependencies",
+      "original": "| Flyway ⚠️ | 10.x | Database migrations",
+      "suggested": "| Spring Retry | 2.x (Spring Boot BOM) | Exponential backoff for OpenAI API rate limits | FR-2, §7 Risk-1 |\n| Flyway ⚠️ | 10.x | Database migrations"
+    },
+    {
+      "issueId": "CRIT-6",
+      "location": "spec.md#section-4.1 dependencies table",
+      "description": "Add Testcontainers to dependencies (test scope)",
+      "original": "| OpenAI API | — | text-embedding-3-small + gpt-4o-mini",
+      "suggested": "| Testcontainers ⚠️ | 1.19.x | Containerized PostgreSQL + Kafka for integration tests (scope=test) | §6.2 |\n| OpenAI API | — | text-embedding-3-small + gpt-4o-mini"
+    }
+  ]
+}

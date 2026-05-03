@@ -1,0 +1,397 @@
+storyId: DIS-001
+createdAt: "2026-05-02T00:00:00Z"
+createdBy: "@architect"
+status: pending
+complexity: STANDARD
+estimatedEffort: "2-3 days"
+
+# Source: spec.md §4.1 (all deps verified against constraints CON-1 to CON-7)
+dependencies:
+  - name: spring-boot
+    version: "3.3.x"
+    purpose: Application framework
+  - name: spring-ai
+    version: "1.0.x"
+    purpose: LLM and embedding provider abstraction (Strategy Pattern)
+  - name: spring-kafka
+    version: "3.x (Spring Boot BOM)"
+    purpose: "@KafkaListener, KafkaTemplate for EDA"
+  - name: spring-retry
+    version: "2.x (Spring Boot BOM)"
+    purpose: Exponential backoff for OpenAI API rate limits
+  - name: apache-pdfbox
+    version: "3.0.x"
+    purpose: Plain text extraction from PDFs (no OCR)
+  - name: springdoc-openapi
+    version: "2.x"
+    purpose: OpenAPI 3 docs + Swagger UI
+  - name: flyway
+    version: "10.x"
+    purpose: Database migrations (pgvector extension + schema)
+  - name: testcontainers
+    version: "1.19.x"
+    purpose: Containerized PostgreSQL + Kafka for integration tests (scope=test)
+  - name: pgvector-jdbc
+    version: "0.1.x"
+    purpose: pgvector native column type support in JDBC/JPA
+
+phases:
+
+  # ─────────────────────────────────────────────
+  # PHASE 1 — Setup & Infrastructure
+  # Database changes first; app skeleton before implementation
+  # ─────────────────────────────────────────────
+  - id: phase-1
+    name: "Setup & Infrastructure"
+    description: "Initialize project, configure docker-compose stack, and create all Flyway schema migrations. All implementation phases depend on this phase completing."
+    subtasks:
+
+      - id: "1.1"
+        description: "Initialize Spring Boot 3.3 project with Java 21: pom.xml with all production dependencies (Spring Web, Data JPA, Kafka, Spring AI, Flyway, PDFBox, Springdoc, Spring Retry, Lombok, Validation, pgvector-jdbc). Configure application.yml with externalized properties (datasource, Kafka bootstrap, OpenAI key placeholder, RAG params: chunkSize=1000, chunkOverlap=200, topK=5, PDF_STORAGE_PATH). Create .env.example with all required env vars."
+        service: infra
+        files:
+          - pom.xml
+          - src/main/resources/application.yml
+          - .env.example
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        notes: "Set Java 21 as source/target in maven-compiler-plugin. Include spring-boot-starter-actuator for health checks used in 1.3 verification."
+
+      - id: "1.2"
+        description: "Create docker-compose.yml with: PostgreSQL 15 (pgvector image: pgvector/pgvector:pg15), Kafka 3.7 + Zookeeper, Spring Boot app service, and named volume pdf-storage mounted to both app service and (if separate) consumer. All services use environment variables from .env file."
+        service: infra
+        files:
+          - docker-compose.yml
+        verification:
+          type: command
+          command: "docker compose config"
+        status: pending
+        dependencies: ["1.1"]
+        notes: "Use image ankane/pgvector or pgvector/pgvector:pg15 which includes the pgvector extension pre-installed. Named volume: pdf-storage driver: local. Map PDF_STORAGE_PATH to /app/pdf-storage inside container."
+
+      - id: "1.3"
+        description: "Flyway migration V1: create documents table with columns id (UUID PK default gen_random_uuid()), filename (VARCHAR NOT NULL), storage_path (VARCHAR), status (VARCHAR NOT NULL default PROCESSING), uploaded_at (TIMESTAMPTZ NOT NULL default now()), file_size_bytes (BIGINT)."
+        service: database
+        files:
+          - src/main/resources/db/migration/V1__create_documents.sql
+        verification:
+          type: api
+          url: "http://localhost:8080/actuator/health"
+          expectedStatus: 200
+        status: pending
+        dependencies: ["1.2"]
+        notes: "Run docker-compose up before verifying. Flyway applies migrations on startup. Check actuator/health returns UP to confirm migration succeeded."
+
+      - id: "1.4"
+        description: "Flyway migration V2: create chunks table with columns id (UUID PK), document_id (UUID NOT NULL FK → documents.id ON DELETE CASCADE), content (TEXT NOT NULL), chunk_index (INTEGER NOT NULL). Add index on document_id."
+        service: database
+        files:
+          - src/main/resources/db/migration/V2__create_chunks.sql
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.3"]
+
+      - id: "1.5"
+        description: "Flyway migration V3: enable pgvector extension (CREATE EXTENSION IF NOT EXISTS vector), create embeddings table with columns id (UUID PK), chunk_id (UUID NOT NULL FK → chunks.id ON DELETE CASCADE), vector (VECTOR(1536) NOT NULL). Add IVFFlat index for cosine similarity: CREATE INDEX ON embeddings USING ivfflat (vector vector_cosine_ops) WITH (lists = 100)."
+        service: database
+        files:
+          - src/main/resources/db/migration/V3__create_embeddings_pgvector.sql
+        verification:
+          type: api
+          url: "http://localhost:8080/actuator/health"
+          expectedStatus: 200
+        status: pending
+        dependencies: ["1.4"]
+        notes: "ivfflat lists=100 is appropriate for MVP scale. The pgvector/pgvector:pg15 Docker image includes the extension binary — only the SQL EXTENSION command is needed."
+
+  # ─────────────────────────────────────────────
+  # PHASE 2 — Core Implementation
+  # Backend-only. Order: domain → strategies → processing → Kafka → service → API
+  # ─────────────────────────────────────────────
+  - id: phase-2
+    name: "Core Implementation"
+    description: "Implement all application layers in dependency order: JPA entities and repositories, strategy abstractions (Storage, Embedding, LLM), PDF processing pipeline, Kafka producer/consumer, DocumentService, and REST API layer."
+    subtasks:
+
+      - id: "2.1"
+        description: "Create DocumentStatus enum (PROCESSING, READY, FAILED), Document JPA entity (@Entity, @Id UUID, filename, storagePath, status, uploadedAt, fileSizeBytes), and DocumentRepository (JpaRepository<Document, UUID>)."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/domain/DocumentStatus.java
+          - src/main/java/com/example/documentintelligence/domain/Document.java
+          - src/main/java/com/example/documentintelligence/repository/DocumentRepository.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.3"]
+
+      - id: "2.2"
+        description: "Create Chunk JPA entity (@Entity, @Id UUID, @ManyToOne Document, content TEXT, chunkIndex int) and ChunkRepository (JpaRepository<Chunk, UUID> with findByDocumentId query)."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/domain/Chunk.java
+          - src/main/java/com/example/documentintelligence/repository/ChunkRepository.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.4", "2.1"]
+
+      - id: "2.3"
+        description: "Create Embedding JPA entity (@Entity, id UUID, @OneToOne Chunk, vector float[] mapped to pgvector VECTOR type via custom UserType or pgvector-jdbc Column annotation) and EmbeddingRepository with native query for cosine similarity: findTopKByDocumentId(UUID docId, float[] queryVector, int k) using pgvector <=> operator."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/domain/Embedding.java
+          - src/main/java/com/example/documentintelligence/repository/EmbeddingRepository.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.5", "2.2"]
+        notes: "Native query: SELECT c.content FROM chunks c JOIN embeddings e ON e.chunk_id = c.id WHERE c.document_id = :docId ORDER BY e.vector <=> CAST(:queryVector AS vector) LIMIT :k. Use @Query(nativeQuery=true). pgvector-jdbc handles float[] ↔ VECTOR conversion."
+
+      - id: "2.4"
+        description: "Define StorageService interface (store(String documentId, MultipartFile file): String filePath; retrieve(String filePath): byte[]; delete(String filePath): void). Implement FileSystemStorageService using PDF_STORAGE_PATH env var, creating subdirectory per documentId. Inject via StorageConfig @Bean."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/storage/StorageService.java
+          - src/main/java/com/example/documentintelligence/service/storage/FileSystemStorageService.java
+          - src/main/java/com/example/documentintelligence/config/StorageConfig.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.1"]
+        notes: "Path convention: {PDF_STORAGE_PATH}/{documentId}/{originalFilename}. FileNotFoundException on retrieve if path missing — propagate for EC-7 handling. delete() is silent on missing file (already cleaned). StorageConfig reads PDF_STORAGE_PATH from @Value."
+
+      - id: "2.5"
+        description: "Define EmbeddingProvider interface (embed(String text): float[]). Implement OpenAiEmbeddingProvider using Spring AI EmbeddingClient (text-embedding-3-small, 1536 dimensions). Configure OpenAiConfig with API key from env. Inject EmbeddingProvider @Bean pointing to OpenAiEmbeddingProvider."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/ai/EmbeddingProvider.java
+          - src/main/java/com/example/documentintelligence/service/ai/openai/OpenAiEmbeddingProvider.java
+          - src/main/java/com/example/documentintelligence/config/OpenAiConfig.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.1"]
+        notes: "Use Spring AI's EmbeddingClient abstraction — not OpenAI SDK directly. This ensures FR-5 (Strategy swappability). OpenAiConfig sets spring.ai.openai.api-key from OPENAI_API_KEY env var. Add @Retryable(maxAttempts=3, backoff=@Backoff(delay=1000, multiplier=2)) on embed() for rate limit resilience."
+
+      - id: "2.6"
+        description: "Define LlmProvider interface (complete(String systemPrompt, String userMessage): String). Implement OpenAiLlmProvider using Spring AI ChatClient (gpt-4o-mini). Inject as @Bean via existing OpenAiConfig."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/ai/LlmProvider.java
+          - src/main/java/com/example/documentintelligence/service/ai/openai/OpenAiLlmProvider.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["2.5"]
+        notes: "Use Spring AI's ChatClient.builder(). System prompt: 'Answer the user question based exclusively on the context below. If the answer is not in the context, say you do not know.' LlmProvider.complete() wraps Spring AI call. RuntimeException on ChatClient failure maps to 502 in controller."
+
+      - id: "2.7"
+        description: "Implement PdfExtractor: extract(byte[] pdfBytes): String using Apache PDFBox PDDocument.load() + PDFTextStripper. Throw PdfExtractionException (custom unchecked) if text is blank/empty (image-based PDF) or if PDFBox throws. Close PDDocument in finally block."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/processing/PdfExtractor.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.1"]
+        notes: "PDFBox 3.x API changed from 2.x — use Loader.loadPDF(bytes) instead of PDDocument.load(). Throw PdfExtractionException extends RuntimeException (define inline or in exception package). Consumer catches this to set FAILED status."
+
+      - id: "2.8"
+        description: "Implement TextChunker: chunk(String text): List<String> using sliding window. Read chunkSize and chunkOverlap from @Value('${app.rag.chunkSize:1000}') and @Value('${app.rag.chunkOverlap:200}'). Return list of overlapping text segments, trimming whitespace. Empty/null input returns empty list."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/processing/TextChunker.java
+        verification:
+          type: command
+          command: "./mvnw test -Dtest=TextChunkerTest -q"
+        status: pending
+        dependencies: ["1.1"]
+        notes: "Algorithm: i=0; while i < text.length: add text.substring(i, min(i+chunkSize, text.length)); i += (chunkSize - chunkOverlap). Ensures overlap between consecutive chunks for semantic continuity."
+
+      - id: "2.9"
+        description: "Create DocumentUploadedEvent Java record (String documentId, String filePath, Instant uploadedAt). Implement DocumentEventProducer using KafkaTemplate<String, DocumentUploadedEvent>, publishing to topic 'document-uploaded' with documentId as key. Create KafkaConfig with producer and consumer factory beans, DefaultKafkaProducerFactory with JsonSerializer, and DLQ topic configuration."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/kafka/event/DocumentUploadedEvent.java
+          - src/main/java/com/example/documentintelligence/service/kafka/DocumentEventProducer.java
+          - src/main/java/com/example/documentintelligence/config/KafkaConfig.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.2", "2.1"]
+        notes: "Topics: 'document-uploaded' (main), 'document-uploaded.DLQ' (dead letter). KafkaConfig registers a DefaultErrorHandler with DeadLetterPublishingRecoverer pointed at DLQ topic. Consumer group-id: 'document-intelligence-group'. Use JsonSerializer/JsonDeserializer for event serialization."
+
+      - id: "2.10"
+        description: "Implement DocumentEventConsumer: @KafkaListener on 'document-uploaded' topic with MANUAL_IMMEDIATE AckMode. Full processing pipeline: (1) StorageService.retrieve(filePath) → (2) PdfExtractor.extract(bytes) → (3) TextChunker.chunk(text) → (4) for each chunk: EmbeddingProvider.embed() + persist Chunk + Embedding in transaction → (5) Document.status=READY + StorageService.delete(filePath) → ack. On any exception: Document.status=FAILED, skip delete (preserve file for inspection), do NOT ack (let retry/DLQ handle)."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/kafka/DocumentEventConsumer.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["2.9", "2.7", "2.8", "2.3", "2.4", "2.5"]
+        notes: "Inject Acknowledgment parameter in @KafkaListener method. Use @Transactional on the chunk persist loop. CRITICAL: Do NOT ack on exception — let DefaultErrorHandler retry then route to DLQ. Log structured error: documentId, filePath, exception class + message. Status=FAILED update must be in separate non-transactional call to ensure it commits even if embedding transaction rolled back."
+
+      - id: "2.11"
+        description: "Implement DocumentService with three methods: upload(MultipartFile) — validate type+size → StorageService.store() → DocumentEventProducer.publish() → [on success] persist Document{PROCESSING} → return documentId; on KafkaException → StorageService.delete() → throw 503. getStatus(UUID) → DocumentRepository.findById or 404. query(UUID, String question) → verify READY or throw 409 → EmbeddingProvider.embed(question) → EmbeddingRepository.findTopK() → build prompt → LlmProvider.complete() → return answer."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/service/DocumentService.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["2.10", "2.4", "2.5", "2.6"]
+        notes: "CRITICAL (CRIT-1 fix): Kafka publish BEFORE DB persist in upload(). Order: store → publish → persist → return 202. On KafkaException: delete file, throw ServiceUnavailableException (maps to 503). Validate file: contentType must equal 'application/pdf', size must be <= 10MB (CON-4). Prompt template: system='Answer based only on the following context:' + context chunks joined by newline + user question."
+
+      - id: "2.12"
+        description: "Create request/response DTO records: UploadResponse(UUID documentId), StatusResponse(UUID documentId, String status, String filename), QueryRequest(String question with @NotBlank validation). These are immutable Java records."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/api/dto/UploadResponse.java
+          - src/main/java/com/example/documentintelligence/api/dto/StatusResponse.java
+          - src/main/java/com/example/documentintelligence/api/dto/QueryRequest.java
+        verification:
+          type: command
+          command: "./mvnw compile -q"
+        status: pending
+        dependencies: ["1.1"]
+
+      - id: "2.13"
+        description: "Create QueryResponse DTO record (String answer, List<String> sourceChunks). Implement DocumentController with @RestController and @RequestMapping('/documents'): POST / (multipart), GET /{id}/status, POST /{id}/query. Map ServiceUnavailableException→503, ResourceNotFoundException→404, ConflictException→409, LlmUnavailableException→502, MethodArgumentNotValidException→400. Configure Springdoc OpenAPI bean with API title/version."
+        service: backend
+        files:
+          - src/main/java/com/example/documentintelligence/api/dto/QueryResponse.java
+          - src/main/java/com/example/documentintelligence/api/DocumentController.java
+          - src/main/java/com/example/documentintelligence/config/OpenApiConfig.java
+        verification:
+          type: api
+          url: "http://localhost:8080/swagger-ui/index.html"
+          expectedStatus: 200
+        status: pending
+        dependencies: ["2.11", "2.12"]
+        notes: "Use @RestControllerAdvice for centralized exception mapping. POST /documents accepts @RequestParam MultipartFile file (multipart/form-data). GET /{id}/status returns StatusResponse. POST /{id}/query accepts @Valid @RequestBody QueryRequest. @Operation annotations for Springdoc on each endpoint."
+
+  # ─────────────────────────────────────────────
+  # PHASE 3 — Testing
+  # Unit tests follow implementation; integration tests use Testcontainers
+  # ─────────────────────────────────────────────
+  - id: phase-3
+    name: "Testing"
+    description: "Unit tests for all service components, then Testcontainers-based integration tests covering the full upload-process-query flow, Kafka consumer pipeline, and pgvector similarity search."
+    subtasks:
+
+      - id: "3.1"
+        description: "Write TextChunkerTest: verify chunk count for known input, verify chunk size boundary (last chunk may be smaller), verify overlap (consecutive chunks share expected suffix/prefix), verify empty input returns empty list. Write PdfExtractorTest: verify text extraction from test PDF fixture, verify PdfExtractionException thrown on empty/corrupted bytes."
+        service: backend
+        files:
+          - src/test/java/com/example/documentintelligence/service/processing/TextChunkerTest.java
+          - src/test/java/com/example/documentintelligence/service/processing/PdfExtractorTest.java
+        verification:
+          type: command
+          command: "./mvnw test -Dtest=TextChunkerTest,PdfExtractorTest -q"
+        status: pending
+        dependencies: ["2.7", "2.8"]
+
+      - id: "3.2"
+        description: "Write DocumentServiceTest using @ExtendWith(MockitoExtension): mock StorageService, DocumentEventProducer, EmbeddingProvider, LlmProvider, repositories. Test upload() happy path (returns documentId), upload() on KafkaException (returns 503, no DB save, file deleted), getStatus() found/not-found, query() with READY document, query() with PROCESSING document (409)."
+        service: backend
+        files:
+          - src/test/java/com/example/documentintelligence/service/DocumentServiceTest.java
+        verification:
+          type: command
+          command: "./mvnw test -Dtest=DocumentServiceTest -q"
+        status: pending
+        dependencies: ["2.11"]
+
+      - id: "3.3"
+        description: "Write DocumentEventConsumerTest: mock all dependencies. Test happy path (READY status + file deleted + ack called), test PdfExtractionException (FAILED status + file NOT deleted + no ack), test StorageService.retrieve FileNotFoundException (FAILED + DLQ path), test embedding failure mid-loop (FAILED + partial cleanup)."
+        service: backend
+        files:
+          - src/test/java/com/example/documentintelligence/service/kafka/DocumentEventConsumerTest.java
+        verification:
+          type: command
+          command: "./mvnw test -Dtest=DocumentEventConsumerTest -q"
+        status: pending
+        dependencies: ["2.10"]
+
+      - id: "3.4"
+        description: "Write FileSystemStorageServiceTest: test store creates correct path, retrieve returns bytes, delete removes file, retrieve on missing path throws FileNotFoundException. Write OpenAiEmbeddingProviderTest: mock Spring AI EmbeddingClient, verify embed() returns float[], verify RuntimeException on client failure."
+        service: backend
+        files:
+          - src/test/java/com/example/documentintelligence/service/storage/FileSystemStorageServiceTest.java
+          - src/test/java/com/example/documentintelligence/service/ai/OpenAiEmbeddingProviderTest.java
+        verification:
+          type: command
+          command: "./mvnw test -Dtest=FileSystemStorageServiceTest,OpenAiEmbeddingProviderTest -q"
+        status: pending
+        dependencies: ["2.4", "2.5"]
+
+      - id: "3.5"
+        description: "Write DocumentIntegrationTest (@SpringBootTest, Testcontainers PostgreSQL + Kafka): POST /documents → 202 + documentId, GET /documents/{id}/status → PROCESSING then READY (after consumer processes), POST /documents/{id}/query → 200 + answer. Write KafkaConsumerIntegrationTest: publish event directly to Kafka topic, verify Document transitions to READY and Chunk/Embedding records exist in DB."
+        service: backend
+        files:
+          - src/test/java/com/example/documentintelligence/integration/DocumentIntegrationTest.java
+          - src/test/java/com/example/documentintelligence/integration/KafkaConsumerIntegrationTest.java
+        verification:
+          type: command
+          command: "./mvnw verify -Dtest=DocumentIntegrationTest,KafkaConsumerIntegrationTest -q"
+        status: pending
+        dependencies: ["2.13", "2.10"]
+        notes: "Use @Testcontainers + @Container for PostgreSQL (pgvector image) and Kafka. Mock OpenAI calls with WireMock or Mockito @MockBean to avoid live API calls in CI. Use @DynamicPropertySource to override spring.datasource.url and spring.kafka.bootstrap-servers."
+
+      - id: "3.6"
+        description: "Write PgVectorSearchTest (@DataJpaTest, Testcontainers PostgreSQL with pgvector): insert known Chunk + Embedding records, call EmbeddingRepository.findTopK() with a query vector, verify returned chunks are in correct similarity order and K is respected."
+        service: backend
+        files:
+          - src/test/java/com/example/documentintelligence/integration/PgVectorSearchTest.java
+        verification:
+          type: command
+          command: "./mvnw verify -Dtest=PgVectorSearchTest -q"
+        status: pending
+        dependencies: ["2.3"]
+        notes: "Use @DataJpaTest with replaced auto-configuration for Testcontainers. Insert embeddings with known cosine distances. Verify that findTopK(k=3) returns exactly 3 results in descending similarity order."
+
+  # ─────────────────────────────────────────────
+  # PHASE 4 — Integration & Validation
+  # Full stack E2E verification + documentation
+  # ─────────────────────────────────────────────
+  - id: phase-4
+    name: "Integration & Validation"
+    description: "Full acceptance test run against live docker-compose stack verifying all AC-* and EC-* scenarios. Final README and startup documentation."
+    subtasks:
+
+      - id: "4.1"
+        description: "Run full acceptance test suite against live docker-compose stack. Verify all 9 ACs and critical ECs via Swagger UI and curl/Postman: AC-1 (202 + documentId), AC-2 (Kafka event published), AC-3 (READY after consumer), AC-4 (status polling), AC-5/AC-6 (Q&A answer grounded in doc), AC-7 (provider swap via Spring bean), AC-8 (Swagger UI accessible), AC-9 (DLQ routing on failure). ECs: EC-1 (503 on Kafka down), EC-3 (502 on OpenAI mock down), EC-4 (409 on PROCESSING query), EC-5 (413 on oversized file)."
+        service: backend
+        files: []
+        verification:
+          type: manual
+          instructions: "docker-compose up -d. Upload a PDF via POST http://localhost:8080/documents. Poll GET /documents/{id}/status until READY. POST /documents/{id}/query with a question. Verify answer is relevant. Check Swagger UI at http://localhost:8080/swagger-ui/index.html. Stop Kafka container and verify upload returns 503. Send 15MB file and verify 413."
+        status: pending
+        dependencies: ["3.5", "3.6"]
+
+      - id: "4.2"
+        description: "Create README.md with: project overview, architecture diagram reference (links to docs/architecture/ADR-001), prerequisites (Docker, Java 21, OpenAI API key), quick start (docker-compose up), environment variables table, API reference (3 endpoints with curl examples), known limitations (no OCR, single-host volume, no auth)."
+        service: infra
+        files:
+          - README.md
+        verification:
+          type: manual
+          instructions: "Follow README from scratch on a clean terminal. Verify all curl examples work against running docker-compose stack."
+        status: pending
+        dependencies: ["4.1"]
