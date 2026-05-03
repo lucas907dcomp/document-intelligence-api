@@ -5,6 +5,7 @@ import com.example.documentintelligence.domain.DocumentStatus;
 import com.example.documentintelligence.exception.DocumentNotReadyException;
 import com.example.documentintelligence.exception.FileTooLargeException;
 import com.example.documentintelligence.exception.InvalidFileTypeException;
+import com.example.documentintelligence.exception.LlmUnavailableException;
 import com.example.documentintelligence.exception.ResourceNotFoundException;
 import com.example.documentintelligence.exception.ServiceUnavailableException;
 import com.example.documentintelligence.repository.DocumentRepository;
@@ -104,7 +105,7 @@ public class DocumentService {
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found: " + documentId));
     }
 
-    public String query(UUID documentId, String question) {
+    public QueryResult query(UUID documentId, String question) {
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found: " + documentId));
 
@@ -115,11 +116,19 @@ public class DocumentService {
 
         float[] questionEmbedding = embeddingProvider.embed(question);
         String vectorStr = toVectorString(questionEmbedding);
-        List<String> contextChunks = embeddingRepository.findTopKSimilarChunks(documentId, vectorStr, topK);
+        List<String> sourceChunks = embeddingRepository.findTopKSimilarChunks(documentId, vectorStr, topK);
 
-        String context = String.join("\n\n", contextChunks);
-        return llmProvider.complete(SYSTEM_PROMPT_PREFIX + context, question);
+        String context = String.join("\n\n", sourceChunks);
+        String answer;
+        try {
+            answer = llmProvider.complete(SYSTEM_PROMPT_PREFIX + context, question);
+        } catch (Exception e) {
+            throw new LlmUnavailableException("LLM provider unavailable: " + e.getMessage());
+        }
+        return new QueryResult(answer, sourceChunks);
     }
+
+    public record QueryResult(String answer, List<String> sourceChunks) {}
 
     private static String toVectorString(float[] vector) {
         StringBuilder sb = new StringBuilder("[");
