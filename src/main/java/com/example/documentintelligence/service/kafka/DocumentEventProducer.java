@@ -7,7 +7,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class DocumentEventProducer {
 
-    static final String TOPIC = "document-uploaded";
+    public static final String TOPIC = "document-uploaded";
 
     private final KafkaTemplate<String, DocumentUploadedEvent> kafkaTemplate;
 

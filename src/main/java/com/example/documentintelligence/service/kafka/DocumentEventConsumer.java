@@ -2,7 +2,6 @@ package com.example.documentintelligence.service.kafka;
 
 import com.example.documentintelligence.domain.Chunk;
 import com.example.documentintelligence.domain.DocumentStatus;
-import com.example.documentintelligence.domain.Embedding;
 import com.example.documentintelligence.repository.ChunkRepository;
 import com.example.documentintelligence.repository.DocumentRepository;
 import com.example.documentintelligence.repository.EmbeddingRepository;
@@ -74,10 +73,7 @@ public class DocumentEventConsumer {
                             .chunkIndex(i)
                             .build());
                     float[] vector = embeddingProvider.embed(chunkText);
-                    embeddingRepository.save(Embedding.builder()
-                            .chunk(chunk)
-                            .vector(vector)
-                            .build());
+                    embeddingRepository.insertEmbedding(chunk.getId(), toVectorString(vector));
                 }
                 return null;
             });
@@ -100,5 +96,15 @@ public class DocumentEventConsumer {
             documentRepository.updateStatusById(documentId, DocumentStatus.FAILED);
             // Do NOT acknowledge — DefaultErrorHandler will retry then route to DLQ
         }
+    }
+
+    private static String toVectorString(float[] vector) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < vector.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(vector[i]);
+        }
+        sb.append(']');
+        return sb.toString();
     }
 }
