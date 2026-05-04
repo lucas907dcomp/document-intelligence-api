@@ -90,6 +90,7 @@ class DocumentServiceTest {
     void upload_kafkaFailure_deletesFileAndThrowsServiceUnavailable() throws Exception {
         when(file.getContentType()).thenReturn("application/pdf");
         when(file.getSize()).thenReturn(1024L);
+        when(file.getOriginalFilename()).thenReturn("test.pdf");
         String filePath = "/tmp/doc/test.pdf";
         when(storageService.store(anyString(), any())).thenReturn(filePath);
         doThrow(new RuntimeException("broker unreachable")).when(eventProducer).publish(any());

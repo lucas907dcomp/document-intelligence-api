@@ -6,6 +6,7 @@ import com.example.documentintelligence.exception.InvalidFileTypeException;
 import com.example.documentintelligence.exception.LlmUnavailableException;
 import com.example.documentintelligence.exception.ResourceNotFoundException;
 import com.example.documentintelligence.exception.ServiceUnavailableException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 @RestControllerAdvice
+@Slf4j
 class GlobalExceptionHandler {
 
     @ExceptionHandler(ResourceNotFoundException.class)
@@ -48,6 +50,12 @@ class GlobalExceptionHandler {
                 .reduce((a, b) -> a + "; " + b)
                 .orElse("Validation failed");
         return problem(HttpStatus.BAD_REQUEST, detail);
+    }
+
+    @ExceptionHandler(Exception.class)
+    ResponseEntity<ProblemDetail> handleGeneric(Exception e) {
+        log.error("Unexpected error: {}", e.getMessage(), e);
+        return problem(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred");
     }
 
     private static ResponseEntity<ProblemDetail> problem(HttpStatus status, String detail) {

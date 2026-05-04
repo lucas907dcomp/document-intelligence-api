@@ -18,7 +18,8 @@ public class FileSystemStorageService implements StorageService {
     public String store(String documentId, MultipartFile file) throws IOException {
         Path docDir = baseStoragePath.resolve(documentId);
         Files.createDirectories(docDir);
-        Path destination = docDir.resolve(file.getOriginalFilename());
+        String safeFilename = Path.of(file.getOriginalFilename()).getFileName().toString();
+        Path destination = docDir.resolve(safeFilename);
         Files.copy(file.getInputStream(), destination, StandardCopyOption.REPLACE_EXISTING);
         return destination.toAbsolutePath().toString();
     }

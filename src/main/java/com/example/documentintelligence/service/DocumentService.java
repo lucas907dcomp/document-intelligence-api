@@ -70,6 +70,9 @@ public class DocumentService {
         if (file.getSize() > MAX_FILE_SIZE_BYTES) {
             throw new FileTooLargeException("File exceeds maximum allowed size of 10MB");
         }
+        if (file.getOriginalFilename() == null || file.getOriginalFilename().isBlank()) {
+            throw new InvalidFileTypeException("Filename is required");
+        }
 
         UUID documentId = UUID.randomUUID();
         String filePath;
