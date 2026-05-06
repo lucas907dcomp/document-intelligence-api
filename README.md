@@ -165,13 +165,7 @@ Acesse: **http://localhost:5173**
 
 ## 🖥️ Interface
 
-A interface segue o design system **Vibe Pointer**:
-
-- Fundo preto (`zinc-950`) com grid geométrico sutil
-- Acentos em gradiente **mint green `#20EFA4` → cyan `#00FFFF`**
-- Painéis `zinc-900` com bordas `zinc-800`
-- Animações com **framer-motion** (fade, slide, scale)
-- Componentes **shadcn/ui** sobre Radix UI
+SPA dark-themed com fundo geométrico, paleta de acentos em mint-green/cyan e transições suaves entre fases. Construída com **React 18 + shadcn/ui** sobre Radix UI, com animações via **framer-motion**.
 
 ### Fluxo de estados da UI
 
